@@ -50,7 +50,10 @@ from opentelemetry.sdk.environment_variables import (
 from opentelemetry.sdk.environment_variables._internal import (
     parse_boolean_environment_variable,
 )
-from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.resources import (
+    Resource,
+    _get_process_dependent_resource,
+)
 from opentelemetry.sdk.trace import sampling
 from opentelemetry.sdk.trace._tracer_metrics import create_tracer_metrics
 from opentelemetry.sdk.trace.id_generator import IdGenerator, RandomIdGenerator
@@ -891,8 +894,7 @@ class Span(trace_api.Span, ReadableSpan):
                 logger.warning("Setting attribute on ended span.")
                 return
 
-            for key, value in attributes.items():
-                self._attributes[key] = value
+            self._attributes._set_items(attributes)  # pylint: disable=protected-access
 
     def set_attribute(self, key: str, value: types.AttributeValue) -> None:
         with self._lock:
@@ -990,6 +992,7 @@ class Span(trace_api.Span, ReadableSpan):
                 return
 
             self._end_time = end_time if end_time is not None else time_ns()
+            self._attributes._immutable = True  # pylint: disable=protected-access
 
         if self._record_end_metrics:
             self._record_end_metrics()
@@ -1140,6 +1143,9 @@ class Tracer(trace_api.Tracer):
 
     def _set_tracer_config(self, tracer_config: _TracerConfig):
         self._tracer_config = tracer_config
+
+    def _set_resource(self, resource: Resource) -> None:
+        self.resource = resource
 
     def _is_enabled(self) -> bool:
         """If the tracer is not enabled, start_span will create a NonRecordingSpan"""
@@ -1345,6 +1351,18 @@ class TracerProvider(trace_api.TracerProvider):
         )
         self._tracers_lock = threading.Lock()
         self._tracers: dict[InstrumentationScope, Tracer] = {}
+        if hasattr(os, "register_at_fork"):
+            weak_at_fork = weakref.WeakMethod(self._handle_fork)
+
+            def _after_in_child() -> None:
+                if at_fork := weak_at_fork():
+                    at_fork()
+
+            os.register_at_fork(after_in_child=_after_in_child)
+
+    def _handle_fork(self) -> None:
+        self._tracers_lock = threading.Lock()
+        self._update_resource(_get_process_dependent_resource())
 
     def _set_tracer_configurator(
         self, *, tracer_configurator: _TracerConfiguratorT
@@ -1366,6 +1384,12 @@ class TracerProvider(trace_api.TracerProvider):
     @property
     def resource(self) -> Resource:
         return self._resource
+
+    def _update_resource(self, resource: Resource) -> None:
+        with self._tracers_lock:
+            self._resource = self._resource.merge(resource)
+            for tracer in self._tracers.values():
+                tracer._set_resource(self._resource)  # pylint: disable=protected-access
 
     def _apply_tracer_configurator(
         self, instrumentation_scope: InstrumentationScope
