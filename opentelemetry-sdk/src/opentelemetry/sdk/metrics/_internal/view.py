@@ -91,7 +91,7 @@ class View:
         exclude_attribute_keys: This is a metric stream customizing attribute: this is
             a set of attribute keys. If not `None` then measurement attributes whose
             keys are in ``exclude_attribute_keys`` will be removed before identifying
-            the metric stream. Applied after ``attribute_keys`` if both are provided.
+            the metric stream.
 
 
     This class is not intended to be subclassed by the user.
@@ -110,10 +110,7 @@ class View:
         description: str | None = None,
         attribute_keys: Iterable[str] | None = None,
         aggregation: Aggregation | None = None,
-        exemplar_reservoir_factory: Callable[
-            [type[_Aggregation]], ExemplarReservoirBuilder
-        ]
-        | None = None,
+        exemplar_reservoir_factory: Callable[[type[_Aggregation]], ExemplarReservoirBuilder] | None = None,
         instrument_unit: str | None = None,
         exclude_attribute_keys: Iterable[str] | None = None,
     ):
@@ -127,26 +124,27 @@ class View:
             is None
         ):
             # pylint: disable=broad-exception-raised
-            raise Exception(
-                "Some instrument selection "
-                f"criteria must be provided for View {name}"
-            )
+            raise Exception(f"Some instrument selection criteria must be provided for View {name}")
 
-        if (
-            name is not None
-            and instrument_name is not None
-            and ("*" in instrument_name or "?" in instrument_name)
-        ):
+        if name is not None and instrument_name is not None and ("*" in instrument_name or "?" in instrument_name):
             # pylint: disable=broad-exception-raised
             raise Exception(
                 f"View {name} declared with wildcard "
                 "characters in instrument_name"
             )
-
+        attribute_keys = (
+            set(attribute_keys) if attribute_keys is not None else None
+        )
+        exclude_attribute_keys = (
+            set(exclude_attribute_keys)
+            if exclude_attribute_keys is not None
+            else None
+        )
         if attribute_keys is not None and exclude_attribute_keys is not None:
-            overlap = set(attribute_keys).intersection(exclude_attribute_keys)
+            overlap = attribute_keys.intersection(exclude_attribute_keys)
 
             if overlap:
+                # pylint: disable=broad-exception-raised
                 raise Exception(
                     "attribute_keys and exclude_attribute_keys "
                     f"must be disjoint. Overlapping keys: "
@@ -184,11 +182,17 @@ class View:
                 return False
 
         if self._instrument_name is not None:
-            if not fnmatch(instrument.name, self._instrument_name):
+            # Instrument names are treated case-insensitively and are stored
+            # lower-cased by the SDK, so the pattern is lower-cased to match.
+            # fnmatchcase is used instead of fnmatch so it does not rely
+            # on the host platform's filename case sensitivity (normcase).
+            if not fnmatchcase(instrument.name, self._instrument_name.lower()):
                 return False
 
         if self._instrument_unit is not None:
-            if not fnmatch(instrument.unit, self._instrument_unit):
+            # Units are case-sensitive; fnmatchcase keeps matching consistent
+            # across platforms.
+            if not fnmatchcase(instrument.unit, self._instrument_unit):
                 return False
 
         if self._meter_name is not None:
@@ -200,10 +204,7 @@ class View:
                 return False
 
         if self._meter_schema_url is not None:
-            if (
-                instrument.instrumentation_scope.schema_url
-                != self._meter_schema_url
-            ):
+            if instrument.instrumentation_scope.schema_url != self._meter_schema_url:
                 return False
 
         return True
