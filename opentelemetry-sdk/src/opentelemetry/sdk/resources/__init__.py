@@ -65,7 +65,6 @@ from collections.abc import Mapping, Sequence
 from json import dumps
 from os import environ
 from types import ModuleType
-from typing import cast
 from urllib import parse
 
 from opentelemetry.attributes import BoundedAttributes
@@ -191,12 +190,8 @@ class Resource:
 
         if not resource.attributes.get(SERVICE_NAME, None):
             default_service_name = "unknown_service"
-            process_executable_name = cast(
-                str | None,
-                resource.attributes.get(PROCESS_EXECUTABLE_NAME, None),
-            )
-            if process_executable_name:
-                default_service_name += ":" + process_executable_name
+            if sys.executable:
+                default_service_name += f":{os.path.basename(sys.executable)}"
             resource = resource.merge(Resource({SERVICE_NAME: default_service_name}, schema_url))
         return resource
 
@@ -253,7 +248,7 @@ class Resource:
         return self._attributes == other._attributes and self._schema_url == other._schema_url
 
     def __hash__(self) -> int:
-        return hash(f"{dumps(self._attributes.copy(), sort_keys=True)}|{self._schema_url}")
+        return hash(f"{dumps(self._attributes.copy(), sort_keys=True, default=_json_default)}|{self._schema_url}")
 
     def to_json(self, indent: int | None = 4) -> str:
         return dumps(
@@ -262,7 +257,21 @@ class Resource:
                 "schema_url": self._schema_url,
             },
             indent=indent,
+            default=_json_default,
         )
+
+
+def _json_default(value: object) -> str:
+    """Represent attribute values that `json` cannot encode natively.
+
+    `types.AnyValue` admits `bytes`, which `json.dumps` rejects. Rendering it
+    as hex keeps `to_json` readable and keeps `__hash__` working; `__eq__`
+    still distinguishes `b"\x01"` from the string `"01"`, so the resulting
+    hash collision is harmless.
+    """
+    if isinstance(value, (bytes, bytearray)):
+        return value.hex()
+    return str(value)
 
 
 _EMPTY_RESOURCE = Resource({})
@@ -610,7 +619,14 @@ def get_aggregated_resources(
     """
     detectors_merged_resource = initial_resource or Resource.create()
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+    # The executor is not used as a context manager: exiting it would call
+    # `shutdown(wait=True)` and join still-running workers, so a detector that
+    # blocks longer than `timeout` would hold up the whole call regardless of
+    # `future.result(timeout=...)`. Shut down without waiting instead so the
+    # timeout actually bounds this call. A detector that outlives the timeout
+    # continues in its worker thread until detect() returns.
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+    try:
         futures = [executor.submit(detector.detect) for detector in detectors]
         for detector_ind, future in enumerate(futures):
             detector = detectors[detector_ind]
@@ -632,5 +648,7 @@ def get_aggregated_resources(
                 logger.warning("Exception %s in detector %s, ignoring", ex, detector)
             finally:
                 detectors_merged_resource = detectors_merged_resource.merge(detected_resource)
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
     return detectors_merged_resource
